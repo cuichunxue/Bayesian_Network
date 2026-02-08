@@ -13,11 +13,17 @@ All outputs are exported to the ``output/`` directory as interactive HTML files.
 
 Usage::
 
+    # Batch mode (HTML export)
     python App.py
+
+    # Interactive dashboard
+    python App.py --interactive
+    python App.py --interactive --port 8050
 """
 
 from __future__ import annotations
 
+import argparse
 import logging
 import sys
 from pathlib import Path
@@ -195,5 +201,49 @@ def main() -> None:
     logger.info("=" * 60)
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Bayesian Network Analyzer")
+    parser.add_argument(
+        "--interactive", action="store_true",
+        help="Launch interactive Dash dashboard instead of batch HTML export",
+    )
+    parser.add_argument(
+        "--port", type=int, default=8050,
+        help="Port for interactive dashboard (default: 8050)",
+    )
+    parser.add_argument(
+        "--host", type=str, default="0.0.0.0",
+        help="Host for interactive dashboard (default: 0.0.0.0)",
+    )
+    parser.add_argument(
+        "--debug", action="store_true",
+        help="Enable Dash debug mode",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+
+    if args.interactive:
+        # Interactive dashboard mode
+        setup_logging(level=logging.INFO)
+        _logger = logging.getLogger(__name__)
+        _logger.info("Preparing data and model for interactive dashboard...")
+
+        df = generate_demo_data(n=2000, seed=42)
+        config = BNConfig(
+            scoring_method="bic-d",
+            max_indegree=3,
+            prior_type="BDeu",
+            equivalent_sample_size=5.0,
+            show_progress=True,
+            layout_k=2.0,
+        )
+        analyzer = BayesianAnalyzer(df, config)
+        analyzer.train_model()
+
+        from bayesian_network.interactive import run_server
+        run_server(analyzer, host=args.host, port=args.port, debug=args.debug)
+    else:
+        main()

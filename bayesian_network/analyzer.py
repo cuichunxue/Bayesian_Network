@@ -374,6 +374,114 @@ class BayesianAnalyzer:
         self._mi_cache[target] = sorted_mi
         return dict(sorted_mi)
 
+    # ------------------------------------------------- Markov blanket & bulk query
+    def compute_markov_blanket(self, node: str) -> set[str]:
+        """Return the Markov blanket of *node*: parents + children + children's other parents.
+
+        Parameters
+        ----------
+        node : str
+            Variable name.
+
+        Returns
+        -------
+        set[str]
+            Set of variable names in the Markov blanket (excludes *node* itself).
+
+        Raises
+        ------
+        ModelNotTrainedError
+            If called before :meth:`train_model`.
+        KeyError
+            If *node* is not in the model.
+        """
+        if self._model is None:
+            raise ModelNotTrainedError("Call train_model() before computing Markov blanket.")
+        if node not in self._data.columns:
+            raise KeyError(f"Node '{node}' is not in data columns: {self.columns}")
+
+        import networkx as nx
+        g = nx.DiGraph(self._edges)
+
+        parents = set(g.predecessors(node)) if node in g else set()
+        children = set(g.successors(node)) if node in g else set()
+        co_parents: set[str] = set()
+        for child in children:
+            co_parents |= set(g.predecessors(child))
+
+        blanket = (parents | children | co_parents) - {node}
+        return blanket
+
+    def query_all(
+        self,
+        evidence: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Run inference for every non-evidence variable and return posteriors.
+
+        Parameters
+        ----------
+        evidence : dict, optional
+            Observed variable → value mapping.
+
+        Returns
+        -------
+        dict[str, DiscreteFactor]
+            Variable name → posterior distribution.
+        """
+        if self._inference is None:
+            raise ModelNotTrainedError("Call train_model() before querying.")
+
+        evidence = evidence or {}
+        results: Dict[str, Any] = {}
+        for col in self._data.columns:
+            if col in evidence:
+                continue
+            try:
+                results[col] = self._inference.query(
+                    variables=[col], evidence=evidence,
+                )
+            except Exception as exc:
+                logger.warning("query_all: failed for '%s': %s", col, exc)
+        return results
+
+    def query_blanket(
+        self,
+        node: str,
+        evidence: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Run inference only for nodes within the Markov blanket of *node*.
+
+        This is significantly faster than :meth:`query_all` for large networks.
+
+        Parameters
+        ----------
+        node : str
+            Centre node whose blanket will be queried.
+        evidence : dict, optional
+            Observed variable → value mapping.
+
+        Returns
+        -------
+        dict[str, DiscreteFactor]
+            Variable name → posterior distribution (blanket members + *node*).
+        """
+        if self._inference is None:
+            raise ModelNotTrainedError("Call train_model() before querying.")
+
+        evidence = evidence or {}
+        blanket = self.compute_markov_blanket(node)
+        targets = (blanket | {node}) - set(evidence.keys())
+
+        results: Dict[str, Any] = {}
+        for col in targets:
+            try:
+                results[col] = self._inference.query(
+                    variables=[col], evidence=evidence,
+                )
+            except Exception as exc:
+                logger.warning("query_blanket: failed for '%s': %s", col, exc)
+        return results
+
     def invalidate_cache(self) -> None:
         """Clear the mutual-information cache."""
         self._mi_cache.clear()
