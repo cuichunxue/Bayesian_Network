@@ -432,9 +432,10 @@ class BayesianAnalyzer:
             raise ModelNotTrainedError("Call train_model() before querying.")
 
         evidence = evidence or {}
+        model_nodes = set(self._model.nodes())
         results: Dict[str, Any] = {}
         for col in self._data.columns:
-            if col in evidence:
+            if col in evidence or col not in model_nodes:
                 continue
             try:
                 results[col] = self._inference.query(
@@ -470,10 +471,13 @@ class BayesianAnalyzer:
 
         evidence = evidence or {}
         blanket = self.compute_markov_blanket(node)
+        model_nodes = set(self._model.nodes())
         targets = (blanket | {node}) - set(evidence.keys())
 
         results: Dict[str, Any] = {}
         for col in targets:
+            if col not in model_nodes:
+                continue
             try:
                 results[col] = self._inference.query(
                     variables=[col], evidence=evidence,

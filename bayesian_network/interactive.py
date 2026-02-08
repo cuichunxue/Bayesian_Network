@@ -11,16 +11,15 @@ Usage::
 
 from __future__ import annotations
 
-import json
 import logging
+import math
 from typing import Any, Dict, List, Optional, Tuple
 
 import dash
 import dash_bootstrap_components as dbc
 import networkx as nx
-import numpy as np
 import plotly.graph_objects as go
-from dash import Input, Output, State, callback_context, dcc, html
+from dash import ALL, Input, Output, State, dcc, html
 
 from bayesian_network.analyzer import BayesianAnalyzer
 
@@ -92,7 +91,6 @@ def _build_network_figure(
     ))
 
     # --- Arrow annotations ---
-    import math
     annotations = []
     for u, v in g.edges():
         x0, y0 = pos[u]
@@ -273,7 +271,6 @@ def _build_posterior_bars(posteriors: Dict[str, Dict[str, float]], target_node: 
         bars = []
         for state, prob in sorted_states:
             pct = prob * 100
-            bar_color = _C["bar_hi"] if prob >= 0.5 else _C["bar_fill"] if prob >= 0.2 else _C["bar_lo"]
             bars.append(
                 html.Div([
                     html.Div([
@@ -373,7 +370,7 @@ def layout(analyzer: BayesianAnalyzer) -> dbc.Container:
                 # Search
                 dbc.InputGroup([
                     dbc.InputGroupText(html.I(className="bi bi-search") if False else "Search"),
-                    dbc.Input(id="node-search", placeholder="Search nodes...", type="text", size="sm"),
+                    dbc.Input(id="node-search", placeholder="Search nodes...", type="text", size="sm", debounce=True),
                 ], className="mb-3", size="sm"),
 
                 # Evidence section
@@ -552,18 +549,15 @@ def register_callbacks(app: dash.Dash, analyzer: BayesianAnalyzer) -> None:
     # ------------------------------------------------------------------
     @app.callback(
         Output("evidence-store", "data"),
-        [Input({"type": "evidence-dd", "node": node}, "value") for node in columns],
-        [State("evidence-store", "data"),
-         State("target-dropdown", "value")],
+        Input({"type": "evidence-dd", "node": ALL}, "value"),
+        State({"type": "evidence-dd", "node": ALL}, "id"),
+        State("target-dropdown", "value"),
         prevent_initial_call=True,
     )
-    def on_evidence_change(*args):
-        values = args[:len(columns)]
-        old_evidence = args[len(columns)] or {}
-        target = args[len(columns) + 1]
-
+    def on_evidence_change(values, ids, target):
         new_evidence = {}
-        for node, val in zip(columns, values):
+        for dd_id, val in zip(ids, values):
+            node = dd_id["node"]
             if val and node != target:
                 new_evidence[node] = val
         return new_evidence
