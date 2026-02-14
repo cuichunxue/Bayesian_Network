@@ -13,12 +13,12 @@ All outputs are exported to the ``output/`` directory as interactive HTML files.
 
 Usage::
 
-    # Batch mode (HTML export)
+    # Standard batch mode (all charts)
     python App.py
 
-    # Interactive dashboard
+    # Interactive dashboard with evidence
     python App.py --interactive
-    python App.py --interactive --port 8050
+    python App.py --interactive --evidence Weather=Rainy Accident=Yes
 """
 
 from __future__ import annotations
@@ -205,19 +205,19 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Bayesian Network Analyzer")
     parser.add_argument(
         "--interactive", action="store_true",
-        help="Launch interactive Dash dashboard instead of batch HTML export",
+        help="Generate interactive dashboard HTML with evidence support",
     )
     parser.add_argument(
-        "--port", type=int, default=8050,
-        help="Port for interactive dashboard (default: 8050)",
+        "--evidence", nargs="*", default=[],
+        help="Evidence as KEY=VALUE pairs (e.g. Weather=Rainy Accident=Yes)",
     )
     parser.add_argument(
-        "--host", type=str, default="0.0.0.0",
-        help="Host for interactive dashboard (default: 0.0.0.0)",
+        "--target", type=str, default="Commute",
+        help="Target node for the dashboard (default: Commute)",
     )
     parser.add_argument(
-        "--debug", action="store_true",
-        help="Enable Dash debug mode",
+        "--output", type=str, default=None,
+        help="Output path for dashboard HTML (default: output/dashboard_interactive.html)",
     )
     return parser.parse_args()
 
@@ -226,10 +226,12 @@ if __name__ == "__main__":
     args = parse_args()
 
     if args.interactive:
-        # Interactive dashboard mode
-        setup_logging(level=logging.INFO)
-        _logger = logging.getLogger(__name__)
-        _logger.info("Preparing data and model for interactive dashboard...")
+        # Parse evidence
+        evidence = {}
+        for item in args.evidence:
+            if "=" in item:
+                k, v = item.split("=", 1)
+                evidence[k] = v
 
         df = generate_demo_data(n=2000, seed=42)
         config = BNConfig(
@@ -243,7 +245,12 @@ if __name__ == "__main__":
         analyzer = BayesianAnalyzer(df, config)
         analyzer.train_model()
 
-        from bayesian_network.interactive import run_server
-        run_server(analyzer, host=args.host, port=args.port, debug=args.debug)
+        from bayesian_network.interactive import save_dashboard
+        out = args.output or str(OUTPUT_DIR / "dashboard_interactive.html")
+        path = save_dashboard(
+            analyzer, target_node=args.target,
+            evidence=evidence, html_path=out,
+        )
+        logger.info("Dashboard saved: %s", path)
     else:
         main()
