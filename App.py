@@ -208,6 +208,18 @@ def parse_args() -> argparse.Namespace:
         help="Generate interactive dashboard HTML with evidence support",
     )
     parser.add_argument(
+        "--web", action="store_true",
+        help="Launch Flask web application for interactive analysis",
+    )
+    parser.add_argument(
+        "--host", type=str, default="127.0.0.1",
+        help="Web server host (default: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--port", type=int, default=5000,
+        help="Web server port (default: 5000)",
+    )
+    parser.add_argument(
         "--evidence", nargs="*", default=[],
         help="Evidence as KEY=VALUE pairs (e.g. Weather=Rainy Accident=Yes)",
     )
@@ -225,7 +237,10 @@ def parse_args() -> argparse.Namespace:
 if __name__ == "__main__":
     args = parse_args()
 
-    if args.interactive:
+    if args.web:
+        from bayesian_network.webapp import main as web_main
+        web_main(host=args.host, port=args.port)
+    elif args.interactive:
         # Parse evidence
         evidence = {}
         for item in args.evidence:
