@@ -4,6 +4,8 @@ Generates a self-contained HTML file combining network graph,
 sensitivity analysis, evidence settings, and posterior probability bars.
 No server required — just open the HTML in a browser.
 
+Delegates to :mod:`bayesian_network.charts` for all chart construction.
+
 Usage::
 
     from bayesian_network.interactive import save_dashboard
@@ -15,204 +17,21 @@ from __future__ import annotations
 
 import html as html_mod
 import logging
-import math
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
-
-import networkx as nx
-import plotly.graph_objects as go
+from typing import Dict, Optional
 
 from bayesian_network.analyzer import BayesianAnalyzer
+from bayesian_network.charts import (
+    PALETTE,
+    build_network_figure,
+    build_sensitivity_figure,
+)
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Colour constants
-# ---------------------------------------------------------------------------
-_C = {
-    "edge": "rgba(150,160,175,0.55)",
-    "node_border": "rgba(50,60,80,0.9)",
-    "evidence_border": "rgba(34,139,34,0.95)",
-    "target_border": "rgba(220,50,50,0.95)",
-    "bg": "#FAFBFC",
-    "text": "#2E3440",
-    "text_sub": "#6B7280",
-    "bar_fill": "#4C78A8",
-    "bar_hi": "#E45756",
-    "bar_lo": "#72B7B2",
-}
-
-
-def _prob_color(p: float) -> str:
-    """Map probability [0,1] to a blue-white-red colour string."""
-    if p < 0.5:
-        t = p / 0.5
-        r, g, b = int(76 + t * 144), int(120 + t * 100), int(200 - t * 32)
-    else:
-        t = (p - 0.5) / 0.5
-        r, g, b = int(220 + t * 35), int(220 - t * 140), int(168 - t * 100)
-    return f"rgba({r},{g},{b},0.88)"
-
 
 # =========================================================================
-# Plotly figure builders
-# =========================================================================
-
-def _compute_layout(g: nx.DiGraph, cfg: Any) -> Dict[str, Tuple[float, float]]:
-    """Hierarchical or spring layout."""
-    if g.number_of_nodes() == 0:
-        return {}
-    if nx.is_directed_acyclic_graph(g) and g.number_of_edges() > 0:
-        try:
-            for layer, nodes in enumerate(nx.topological_generations(g)):
-                for node in nodes:
-                    g.nodes[node]["subset"] = layer
-            pos = nx.multipartite_layout(g, subset_key="subset", align="horizontal")
-            return {n: (y, -x) for n, (x, y) in pos.items()}
-        except Exception:
-            pass
-    return nx.spring_layout(g, k=cfg.layout_k, seed=cfg.layout_seed, iterations=80)
-
-
-def _build_network_figure(
-    analyzer: BayesianAnalyzer,
-    evidence: Dict[str, str],
-    posteriors: Dict[str, Dict[str, float]],
-    target_node: str,
-) -> go.Figure:
-    """Network graph with posterior-coloured nodes."""
-    g = nx.DiGraph()
-    g.add_nodes_from(analyzer.columns)
-    g.add_edges_from(analyzer.edges)
-    pos = _compute_layout(g, analyzer.config)
-
-    fig = go.Figure()
-
-    # Edges
-    ex, ey = [], []
-    for u, v in g.edges():
-        x0, y0 = pos[u]
-        x1, y1 = pos[v]
-        ex += [x0, x1, None]
-        ey += [y0, y1, None]
-    fig.add_trace(go.Scatter(
-        x=ex, y=ey, mode="lines",
-        line=dict(width=1.2, color=_C["edge"]),
-        hoverinfo="none", showlegend=False,
-    ))
-
-    # Arrows
-    annotations = []
-    for u, v in g.edges():
-        x0, y0 = pos[u]
-        x1, y1 = pos[v]
-        dx, dy = x1 - x0, y1 - y0
-        dist = math.hypot(dx, dy)
-        if dist > 0:
-            x1 -= dx / dist * 0.06
-            y1 -= dy / dist * 0.06
-        annotations.append(dict(
-            ax=x0, ay=y0, x=x1, y=y1,
-            xref="x", yref="y", axref="x", ayref="y",
-            showarrow=True, arrowhead=3, arrowsize=1.1, arrowwidth=1.2,
-            arrowcolor=_C["edge"], opacity=0.6,
-        ))
-
-    # Nodes
-    nodes = list(g.nodes())
-    nx_arr = [pos[n][0] for n in nodes]
-    ny_arr = [pos[n][1] for n in nodes]
-    sizes, colours, borders, border_w, hovers = [], [], [], [], []
-
-    for n in nodes:
-        sizes.append(34)
-        post = posteriors.get(n)
-        if n in evidence:
-            colours.append("rgba(34,139,34,0.85)")
-        elif post:
-            colours.append(_prob_color(max(post.values())))
-        else:
-            colours.append("rgba(180,180,190,0.7)")
-
-        if n == target_node:
-            borders.append(_C["target_border"]); border_w.append(3.0)
-        elif n in evidence:
-            borders.append(_C["evidence_border"]); border_w.append(2.5)
-        else:
-            borders.append(_C["node_border"]); border_w.append(1.5)
-
-        parts = [f"<b>{n}</b>"]
-        if n in evidence:
-            parts.append(f"Evidence: {evidence[n]}")
-        if n == target_node:
-            parts.append("(TARGET)")
-        if post:
-            for st, pr in sorted(post.items(), key=lambda x: -x[1]):
-                parts.append(f"  {st}: {pr:.1%}")
-        hovers.append("<br>".join(parts))
-
-    fig.add_trace(go.Scatter(
-        x=nx_arr, y=ny_arr, mode="markers+text",
-        text=nodes, textposition="top center",
-        textfont=dict(size=11, color=_C["text"]),
-        hovertext=hovers, hoverinfo="text",
-        marker=dict(size=sizes, color=colours,
-                    line=dict(width=border_w, color=borders)),
-        showlegend=False,
-    ))
-
-    fig.update_layout(
-        annotations=annotations, template="plotly_white",
-        plot_bgcolor=_C["bg"], paper_bgcolor="white",
-        margin=dict(l=10, r=10, t=10, b=10),
-        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-        dragmode="pan",
-    )
-    return fig
-
-
-def _build_sensitivity_figure(
-    analyzer: BayesianAnalyzer, target_node: str, top_k: int = 15,
-) -> go.Figure:
-    """Horizontal MI bar chart."""
-    try:
-        mi = analyzer.compute_sensitivity(target_node)
-    except KeyError:
-        return go.Figure()
-
-    items = list(mi.items())[:top_k]
-    if not items:
-        return go.Figure()
-
-    names = [k for k, _ in items][::-1]
-    values = [v for _, v in items][::-1]
-    mx = max(values) if values else 1.0
-    bar_c = [
-        _C["bar_hi"] if v >= mx * 0.8
-        else _C["bar_fill"] if v >= mx * 0.3
-        else _C["bar_lo"]
-        for v in values
-    ]
-
-    fig = go.Figure(go.Bar(
-        x=values, y=names, orientation="h",
-        marker=dict(color=bar_c, line=dict(width=0.5, color="rgba(0,0,0,0.12)")),
-        hovertemplate="%{y}: MI = %{x:.6f}<extra></extra>",
-    ))
-    fig.update_layout(
-        template="plotly_white",
-        plot_bgcolor=_C["bg"], paper_bgcolor="white",
-        margin=dict(l=110, r=15, t=30, b=30),
-        xaxis=dict(title="Mutual Information", gridcolor="rgba(0,0,0,0.04)"),
-        yaxis=dict(title=""),
-        height=max(280, len(names) * 26 + 80),
-    )
-    return fig
-
-
-# =========================================================================
-# HTML builders (pure strings, no Dash)
+# HTML fragment builders
 # =========================================================================
 
 def _evidence_html(evidence: Dict[str, str]) -> str:
@@ -232,7 +51,8 @@ def _evidence_html(evidence: Dict[str, str]) -> str:
 
 
 def _posterior_html(
-    posteriors: Dict[str, Dict[str, float]], target_node: str,
+    posteriors: Dict[str, Dict[str, float]],
+    target_node: str,
 ) -> str:
     """Render posterior probability bars as HTML."""
     if not posteriors:
@@ -249,7 +69,7 @@ def _posterior_html(
         if not probs:
             continue
         is_target = var == target_node
-        border = f"2px solid {_C['target_border']}" if is_target else "1px solid #DEE2E6"
+        border = f"2px solid {PALETTE['target_border']}" if is_target else "1px solid #DEE2E6"
         header_bg = "#FFF3F3" if is_target else "#F8F9FA"
         tag = ' <span style="color:#E45756;font-size:11px;">(TARGET)</span>' if is_target else ""
         ev = html_mod.escape(var)
@@ -347,9 +167,31 @@ def save_dashboard(
     except Exception as exc:
         logger.warning("Inference failed: %s", exc)
 
-    # --- Build Plotly figures ---
-    net_fig = _build_network_figure(analyzer, evidence, posteriors, target_node)
-    sens_fig = _build_sensitivity_figure(analyzer, target_node, top_k)
+    # --- Build Plotly figures (delegating to charts module) ---
+    cfg = analyzer.config
+    net_fig = build_network_figure(
+        columns=analyzer.columns,
+        edges=analyzer.edges,
+        layout_k=cfg.layout_k,
+        layout_seed=cfg.layout_seed,
+        target_node=target_node,
+        evidence=evidence,
+        posteriors=posteriors,
+        show_title=False,
+        width=0,
+        height=0,
+    )
+
+    try:
+        mi_scores = analyzer.compute_sensitivity(target_node)
+    except KeyError:
+        mi_scores = {}
+    sens_fig = build_sensitivity_figure(
+        mi_scores=mi_scores,
+        target_node=target_node,
+        top_k=top_k,
+        show_title=False,
+    )
 
     net_div = net_fig.to_html(include_plotlyjs=False, full_html=False, config={
         "scrollZoom": True, "displayModeBar": True,
@@ -364,7 +206,9 @@ def save_dashboard(
 
     ev_title = html_mod.escape(target_node)
     ev_count = len(evidence)
-    ev_desc = ", ".join(f"{k}={v}" for k, v in evidence.items()) if evidence else "none"
+    ev_desc = ", ".join(
+        f"{html_mod.escape(k)}={html_mod.escape(v)}" for k, v in evidence.items()
+    ) if evidence else "none"
 
     # --- Summary stats ---
     summary = analyzer.summary()
@@ -386,7 +230,7 @@ def save_dashboard(
 <style>
   * {{ margin: 0; padding: 0; box-sizing: border-box; }}
   body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
-         sans-serif; background: #F0F2F5; color: {_C["text"]}; }}
+         sans-serif; background: #F0F2F5; color: {PALETTE["text"]}; }}
   .header {{ background: #1F2937; color: white; padding: 14px 24px;
              display: flex; align-items: center; justify-content: space-between; }}
   .header h1 {{ font-size: 18px; font-weight: 600; }}
@@ -415,7 +259,7 @@ def save_dashboard(
 <div class="header">
   <div>
     <h1>Bayesian Network Dashboard</h1>
-    <div class="meta">Target: <b>{ev_title}</b> &nbsp;|&nbsp; Evidence ({ev_count}): {html_mod.escape(ev_desc)}</div>
+    <div class="meta">Target: <b>{ev_title}</b> &nbsp;|&nbsp; Evidence ({ev_count}): {ev_desc}</div>
   </div>
 </div>
 <div class="stats">{stats_html}</div>
@@ -427,9 +271,9 @@ def save_dashboard(
       <div class="card-head">
         Network Structure — target: {ev_title}
         <div class="legend">
-          <div class="legend-item"><div class="legend-dot" style="background:rgba(220,50,50,0.9);border:2px solid {_C["target_border"]};"></div> Target</div>
-          <div class="legend-item"><div class="legend-dot" style="background:rgba(34,139,34,0.85);border:2px solid {_C["evidence_border"]};"></div> Evidence</div>
-          <div class="legend-item"><div class="legend-dot" style="background:rgba(180,180,190,0.7);border:2px solid {_C["node_border"]};"></div> Other</div>
+          <div class="legend-item"><div class="legend-dot" style="background:rgba(220,50,50,0.9);border:2px solid {PALETTE["target_border"]};"></div> Target</div>
+          <div class="legend-item"><div class="legend-dot" style="background:rgba(34,139,34,0.85);border:2px solid {PALETTE["evidence_border"]};"></div> Evidence</div>
+          <div class="legend-item"><div class="legend-dot" style="background:rgba(180,180,190,0.7);border:2px solid {PALETTE["node_border"]};"></div> Other</div>
         </div>
       </div>
       <div class="card-body" style="padding:4px;">{net_div}</div>

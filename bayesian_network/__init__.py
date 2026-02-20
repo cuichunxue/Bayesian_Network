@@ -9,4 +9,4 @@ from bayesian_network.analyzer import BayesianAnalyzer
 from bayesian_network.visualizer import NetworkVisualizer
 
 __all__ = ["BNConfig", "BayesianAnalyzer", "NetworkVisualizer"]
-__version__ = "1.2.0"
+__version__ = "1.3.0"

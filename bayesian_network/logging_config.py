@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 
 _LOG_FORMAT = "%(asctime)s [%(levelname)-8s] %(name)s: %(message)s"
@@ -19,8 +19,9 @@ _configured = False
 
 
 def setup_logging(
-    level: int | str = logging.INFO,
+    level: Union[int, str] = logging.INFO,
     log_file: Optional[str] = None,
+    force: bool = False,
 ) -> None:
     """Configure package-wide logging.
 
@@ -30,9 +31,11 @@ def setup_logging(
         Logging level (e.g. ``logging.DEBUG``, ``"INFO"``).
     log_file : str, optional
         If given, also write logs to this file.
+    force : bool
+        If ``True``, reconfigure even if already configured.
     """
     global _configured
-    if _configured:
+    if _configured and not force:
         return
 
     if isinstance(level, str):
@@ -40,6 +43,9 @@ def setup_logging(
 
     root = logging.getLogger("bayesian_network")
     root.setLevel(level)
+
+    # Remove existing handlers before (re-)configuring
+    root.handlers.clear()
 
     formatter = logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATE_FORMAT)
 

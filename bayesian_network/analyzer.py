@@ -9,8 +9,9 @@ from __future__ import annotations
 import inspect
 import logging
 import time
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
+import networkx as nx
 import numpy as np
 import pandas as pd
 from pgmpy.estimators import BayesianEstimator, HillClimbSearch
@@ -99,7 +100,7 @@ class BayesianAnalyzer:
         return self._config
 
     @property
-    def columns(self) -> list[str]:
+    def columns(self) -> List[str]:
         """Return column names of the prepared data."""
         return list(self._data.columns)
 
@@ -262,7 +263,7 @@ class BayesianAnalyzer:
                 required_edges=list(white_list or []),
             )
 
-        candidate_kwargs: dict[str, Any] = {
+        candidate_kwargs: Dict[str, Any] = {
             "scoring_method": self._config.scoring_method,
             "max_indegree": self._config.max_indegree,
             "show_progress": self._config.show_progress,
@@ -363,7 +364,7 @@ class BayesianAnalyzer:
         logger.info("Computing mutual information for target='%s'", target)
         y = self._data[target].astype(str).to_numpy()
 
-        mi: dict[str, float] = {}
+        mi: Dict[str, float] = {}
         for col in self._data.columns:
             if col == target:
                 continue
@@ -375,7 +376,7 @@ class BayesianAnalyzer:
         return dict(sorted_mi)
 
     # ------------------------------------------------- Markov blanket & bulk query
-    def compute_markov_blanket(self, node: str) -> set[str]:
+    def compute_markov_blanket(self, node: str) -> Set[str]:
         """Return the Markov blanket of *node*: parents + children + children's other parents.
 
         Parameters
@@ -385,7 +386,7 @@ class BayesianAnalyzer:
 
         Returns
         -------
-        set[str]
+        Set[str]
             Set of variable names in the Markov blanket (excludes *node* itself).
 
         Raises
@@ -400,12 +401,11 @@ class BayesianAnalyzer:
         if node not in self._data.columns:
             raise KeyError(f"Node '{node}' is not in data columns: {self.columns}")
 
-        import networkx as nx
         g = nx.DiGraph(self._edges)
 
         parents = set(g.predecessors(node)) if node in g else set()
         children = set(g.successors(node)) if node in g else set()
-        co_parents: set[str] = set()
+        co_parents: Set[str] = set()
         for child in children:
             co_parents |= set(g.predecessors(child))
 

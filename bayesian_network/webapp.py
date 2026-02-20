@@ -3,6 +3,8 @@
 Upload or paste CSV data, configure analysis parameters, train models,
 and explore results through multiple interactive Plotly charts.
 
+Delegates to :mod:`bayesian_network.charts` for all chart construction.
+
 Usage::
 
     # From CLI
@@ -29,7 +31,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+from sklearn.metrics import mutual_info_score
 
 from flask import (
     Flask,
@@ -37,19 +39,32 @@ from flask import (
     redirect,
     render_template_string,
     request,
-    session,
     url_for,
 )
 
 from bayesian_network.analyzer import BayesianAnalyzer
+from bayesian_network.charts import (
+    PALETTE,
+    build_cpd_heatmap_figure,
+    build_data_distribution_figure,
+    build_edge_strength_figure,
+    build_markov_blanket_figure,
+    build_mi_matrix_figure,
+    build_network_figure,
+    build_posterior_figure,
+    build_sensitivity_figure,
+    fig_to_div,
+)
 from bayesian_network.config import BNConfig
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# In-memory model store with TTL
+# In-memory model store with TTL and max-session cap
 # ---------------------------------------------------------------------------
 SESSION_TTL = 3600  # 1 hour
+MAX_SESSIONS = 50
+
 
 @dataclass
 class _Session:
@@ -58,6 +73,7 @@ class _Session:
     created: float
     target_node: str
     evidence: Dict[str, str]
+
 
 _store: Dict[str, _Session] = {}
 _store_lock = threading.Lock()
@@ -81,494 +97,21 @@ def _get_session(sid: str) -> Optional[_Session]:
 def _put_session(sid: str, sess: _Session) -> None:
     _cleanup_expired()
     with _store_lock:
+        # Evict oldest sessions when exceeding cap
+        while len(_store) >= MAX_SESSIONS:
+            oldest_key = min(_store, key=lambda k: _store[k].created)
+            del _store[oldest_key]
         _store[sid] = sess
-
-
-# ---------------------------------------------------------------------------
-# Plotly chart builders
-# ---------------------------------------------------------------------------
-_COLORS = {
-    "primary": "#4C78A8",
-    "danger": "#E45756",
-    "success": "#54A24B",
-    "info": "#72B7B2",
-    "warning": "#EECA3B",
-    "muted": "#B4B4B4",
-    "edge": "rgba(150,160,175,0.55)",
-    "bg": "#FAFBFC",
-    "text": "#2E3440",
-}
-
-import math
-import networkx as nx
-
-
-def _compute_layout(g: nx.DiGraph, cfg: BNConfig) -> Dict[str, Tuple[float, float]]:
-    if g.number_of_nodes() == 0:
-        return {}
-    if nx.is_directed_acyclic_graph(g) and g.number_of_edges() > 0:
-        try:
-            for layer, nodes in enumerate(nx.topological_generations(g)):
-                for node in nodes:
-                    g.nodes[node]["subset"] = layer
-            pos = nx.multipartite_layout(g, subset_key="subset", align="horizontal")
-            return {n: (y, -x) for n, (x, y) in pos.items()}
-        except Exception:
-            pass
-    return nx.spring_layout(g, k=cfg.layout_k, seed=cfg.layout_seed, iterations=80)
-
-
-def build_network_fig(
-    analyzer: BayesianAnalyzer,
-    target_node: str,
-    evidence: Dict[str, str],
-    posteriors: Dict[str, Dict[str, float]],
-) -> go.Figure:
-    """Directed network graph with posterior-coloured nodes."""
-    g = nx.DiGraph()
-    g.add_nodes_from(analyzer.columns)
-    g.add_edges_from(analyzer.edges)
-    pos = _compute_layout(g, analyzer.config)
-
-    fig = go.Figure()
-
-    # Edges
-    ex, ey = [], []
-    for u, v in g.edges():
-        x0, y0 = pos[u]
-        x1, y1 = pos[v]
-        ex += [x0, x1, None]
-        ey += [y0, y1, None]
-    fig.add_trace(go.Scatter(
-        x=ex, y=ey, mode="lines",
-        line=dict(width=1.3, color=_COLORS["edge"]),
-        hoverinfo="none", showlegend=False,
-    ))
-
-    # Arrow annotations
-    annotations = []
-    for u, v in g.edges():
-        x0, y0 = pos[u]
-        x1, y1 = pos[v]
-        dx, dy = x1 - x0, y1 - y0
-        dist = math.hypot(dx, dy)
-        if dist > 0:
-            x1a = x1 - dx / dist * 0.06
-            y1a = y1 - dy / dist * 0.06
-        else:
-            x1a, y1a = x1, y1
-        is_target_edge = (u == target_node or v == target_node)
-        annotations.append(dict(
-            ax=x0, ay=y0, x=x1a, y=y1a,
-            xref="x", yref="y", axref="x", ayref="y",
-            showarrow=True, arrowhead=3, arrowsize=1.1,
-            arrowwidth=2.0 if is_target_edge else 1.2,
-            arrowcolor="rgba(55,90,180,0.8)" if is_target_edge else _COLORS["edge"],
-            opacity=0.85 if is_target_edge else 0.6,
-        ))
-
-    # Nodes
-    nodes = list(g.nodes())
-    nx_arr = [pos[n][0] for n in nodes]
-    ny_arr = [pos[n][1] for n in nodes]
-    sizes, colours, borders, bw, hovers = [], [], [], [], []
-
-    for n in nodes:
-        sizes.append(36)
-        post = posteriors.get(n)
-        if n in evidence:
-            colours.append("rgba(34,139,34,0.85)")
-        elif post:
-            max_p = max(post.values())
-            if max_p >= 0.7:
-                colours.append(_COLORS["danger"])
-            elif max_p >= 0.4:
-                colours.append(_COLORS["primary"])
-            else:
-                colours.append(_COLORS["info"])
-        else:
-            colours.append(_COLORS["muted"])
-
-        if n == target_node:
-            borders.append(_COLORS["danger"])
-            bw.append(3.0)
-        elif n in evidence:
-            borders.append(_COLORS["success"])
-            bw.append(2.5)
-        else:
-            borders.append("rgba(50,60,80,0.9)")
-            bw.append(1.5)
-
-        parts = [f"<b>{n}</b>"]
-        if n in evidence:
-            parts.append(f"Evidence: {evidence[n]}")
-        if n == target_node:
-            parts.append("(TARGET)")
-        if post:
-            for st, pr in sorted(post.items(), key=lambda x: -x[1]):
-                parts.append(f"  {st}: {pr:.1%}")
-        hovers.append("<br>".join(parts))
-
-    fig.add_trace(go.Scatter(
-        x=nx_arr, y=ny_arr, mode="markers+text",
-        text=nodes, textposition="top center",
-        textfont=dict(size=11, color=_COLORS["text"]),
-        hovertext=hovers, hoverinfo="text",
-        marker=dict(size=sizes, color=colours,
-                    line=dict(width=bw, color=borders)),
-        showlegend=False,
-    ))
-
-    fig.update_layout(
-        annotations=annotations, template="plotly_white",
-        plot_bgcolor=_COLORS["bg"], paper_bgcolor="white",
-        margin=dict(l=10, r=10, t=30, b=10),
-        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-        dragmode="pan", height=500,
-    )
-    return fig
-
-
-def build_sensitivity_fig(analyzer: BayesianAnalyzer, target_node: str, top_k: int = 15) -> go.Figure:
-    """Horizontal MI bar chart."""
-    try:
-        mi = analyzer.compute_sensitivity(target_node)
-    except KeyError:
-        return go.Figure()
-    items = list(mi.items())[:top_k]
-    if not items:
-        return go.Figure()
-
-    names = [k for k, _ in items][::-1]
-    values = [v for _, v in items][::-1]
-    mx = max(values) if values else 1.0
-    bar_c = [
-        _COLORS["danger"] if v >= mx * 0.8
-        else _COLORS["primary"] if v >= mx * 0.3
-        else _COLORS["info"]
-        for v in values
-    ]
-    fig = go.Figure(go.Bar(
-        x=values, y=names, orientation="h",
-        marker=dict(color=bar_c, line=dict(width=0.5, color="rgba(0,0,0,0.12)")),
-        hovertemplate="%{y}: MI = %{x:.6f}<extra></extra>",
-    ))
-    fig.update_layout(
-        template="plotly_white",
-        plot_bgcolor=_COLORS["bg"], paper_bgcolor="white",
-        margin=dict(l=120, r=15, t=30, b=40),
-        xaxis=dict(title="Mutual Information", gridcolor="rgba(0,0,0,0.04)"),
-        yaxis=dict(title=""),
-        height=max(300, len(names) * 28 + 80),
-    )
-    return fig
-
-
-def build_posterior_fig(posteriors: Dict[str, Dict[str, float]], target_node: str) -> go.Figure:
-    """Grouped bar chart of posterior probabilities for all variables."""
-    if not posteriors:
-        return go.Figure()
-
-    # Order: target first, then by name
-    ordered = []
-    if target_node in posteriors:
-        ordered.append(target_node)
-    ordered += sorted(k for k in posteriors if k != target_node)
-
-    fig = make_subplots(
-        rows=len(ordered), cols=1,
-        subplot_titles=ordered,
-        vertical_spacing=max(0.02, 0.3 / max(len(ordered), 1)),
-        shared_xaxes=False,
-    )
-
-    for i, var in enumerate(ordered, 1):
-        probs = posteriors[var]
-        states = sorted(probs.keys())
-        vals = [probs[s] for s in states]
-        color = _COLORS["danger"] if var == target_node else _COLORS["primary"]
-        fig.add_trace(go.Bar(
-            x=states, y=vals, name=var,
-            marker=dict(color=color, line=dict(width=0.5, color="rgba(0,0,0,0.1)")),
-            hovertemplate="%{x}: %{y:.1%}<extra>" + var + "</extra>",
-            showlegend=False,
-        ), row=i, col=1)
-        fig.update_yaxes(range=[0, 1], tickformat=".0%", row=i, col=1)
-
-    total_h = max(200, len(ordered) * 160)
-    fig.update_layout(
-        template="plotly_white",
-        plot_bgcolor=_COLORS["bg"], paper_bgcolor="white",
-        margin=dict(l=50, r=20, t=40, b=20),
-        height=total_h,
-    )
-    return fig
-
-
-def build_cpd_fig(analyzer: BayesianAnalyzer, node: str) -> go.Figure:
-    """CPD heatmap for a single node."""
-    import itertools
-
-    model = analyzer.model
-    cpd = model.get_cpds(node)
-    values = cpd.get_values()
-    state_names = cpd.state_names
-    var = cpd.variable
-    row_labels = [str(s) for s in state_names[var]]
-
-    parents = cpd.variables[1:]
-    if parents:
-        parent_states = [state_names[p] for p in parents]
-        combos = list(itertools.product(*parent_states))
-        col_labels = [" | ".join(f"{p}={s}" for p, s in zip(parents, c)) for c in combos]
-    else:
-        col_labels = ["(no parents)"]
-
-    if values.ndim == 1:
-        values = values.reshape(-1, 1)
-
-    fig = go.Figure(go.Heatmap(
-        z=values, x=col_labels, y=row_labels,
-        colorscale="Blues",
-        hovertemplate="P(%{y} | %{x}) = %{z:.4f}<extra></extra>",
-        colorbar=dict(title="P", thickness=12),
-    ))
-    fig.update_layout(
-        title=dict(text=f"P({node} | parents)", font=dict(size=14)),
-        template="plotly_white",
-        plot_bgcolor=_COLORS["bg"], paper_bgcolor="white",
-        xaxis=dict(title="Parent States", tickangle=-45, tickfont=dict(size=10)),
-        yaxis=dict(title=f"{node}", autorange="reversed"),
-        margin=dict(l=70, r=20, t=50, b=100),
-        height=max(300, len(row_labels) * 40 + 150),
-    )
-    return fig
-
-
-def build_data_distribution_fig(df: pd.DataFrame) -> go.Figure:
-    """Value distribution bar charts for every column in the dataset."""
-    cols = list(df.columns)
-    n = len(cols)
-    if n == 0:
-        return go.Figure()
-
-    n_cols = min(3, n)
-    n_rows = (n + n_cols - 1) // n_cols
-
-    fig = make_subplots(
-        rows=n_rows, cols=n_cols,
-        subplot_titles=cols,
-        vertical_spacing=max(0.03, 0.4 / max(n_rows, 1)),
-        horizontal_spacing=0.08,
-    )
-
-    palette = ["#4C78A8", "#F58518", "#E45756", "#72B7B2", "#54A24B", "#EECA3B", "#B279A2", "#FF9DA6"]
-
-    for idx, col in enumerate(cols):
-        r = idx // n_cols + 1
-        c = idx % n_cols + 1
-        vc = df[col].astype(str).value_counts()
-        fig.add_trace(go.Bar(
-            x=vc.index.tolist(), y=vc.values.tolist(),
-            marker=dict(color=palette[idx % len(palette)]),
-            hovertemplate="%{x}: %{y}<extra>" + col + "</extra>",
-            showlegend=False,
-        ), row=r, col=c)
-
-    fig.update_layout(
-        template="plotly_white",
-        plot_bgcolor=_COLORS["bg"], paper_bgcolor="white",
-        margin=dict(l=40, r=20, t=40, b=30),
-        height=max(300, n_rows * 250),
-    )
-    return fig
-
-
-def build_mi_matrix_fig(analyzer: BayesianAnalyzer) -> go.Figure:
-    """Mutual information matrix heatmap between all pairs of columns."""
-    cols = analyzer.columns
-    n = len(cols)
-    matrix = np.zeros((n, n))
-    data = analyzer.data
-
-    for i in range(n):
-        xi = data[cols[i]].astype(str).to_numpy()
-        for j in range(i + 1, n):
-            from sklearn.metrics import mutual_info_score
-            xj = data[cols[j]].astype(str).to_numpy()
-            mi = float(mutual_info_score(xi, xj))
-            matrix[i][j] = mi
-            matrix[j][i] = mi
-
-    fig = go.Figure(go.Heatmap(
-        z=matrix, x=cols, y=cols,
-        colorscale="Viridis",
-        hovertemplate="MI(%{x}, %{y}) = %{z:.4f}<extra></extra>",
-        colorbar=dict(title="MI", thickness=12),
-    ))
-    fig.update_layout(
-        title=dict(text="Mutual Information Matrix", font=dict(size=14)),
-        template="plotly_white",
-        plot_bgcolor=_COLORS["bg"], paper_bgcolor="white",
-        margin=dict(l=80, r=20, t=50, b=80),
-        height=max(400, n * 40 + 100),
-        width=max(500, n * 40 + 150),
-        xaxis=dict(tickangle=-45, tickfont=dict(size=10)),
-        yaxis=dict(autorange="reversed", tickfont=dict(size=10)),
-    )
-    return fig
-
-
-def build_edge_strength_fig(analyzer: BayesianAnalyzer) -> go.Figure:
-    """Bar chart showing MI for each learned edge."""
-    edges = analyzer.edges
-    if not edges:
-        return go.Figure()
-
-    data = analyzer.data
-    from sklearn.metrics import mutual_info_score
-
-    edge_labels = []
-    mi_vals = []
-    for u, v in edges:
-        xu = data[u].astype(str).to_numpy()
-        xv = data[v].astype(str).to_numpy()
-        mi = float(mutual_info_score(xu, xv))
-        edge_labels.append(f"{u} -> {v}")
-        mi_vals.append(mi)
-
-    # Sort by MI descending
-    pairs = sorted(zip(edge_labels, mi_vals), key=lambda x: x[1], reverse=True)
-    edge_labels = [p[0] for p in pairs][::-1]
-    mi_vals = [p[1] for p in pairs][::-1]
-
-    mx = max(mi_vals) if mi_vals else 1.0
-    bar_c = [
-        _COLORS["danger"] if v >= mx * 0.7
-        else _COLORS["primary"] if v >= mx * 0.3
-        else _COLORS["info"]
-        for v in mi_vals
-    ]
-
-    fig = go.Figure(go.Bar(
-        x=mi_vals, y=edge_labels, orientation="h",
-        marker=dict(color=bar_c, line=dict(width=0.5, color="rgba(0,0,0,0.1)")),
-        hovertemplate="%{y}: MI = %{x:.6f}<extra></extra>",
-    ))
-    fig.update_layout(
-        title=dict(text="Edge Strength (MI)", font=dict(size=14)),
-        template="plotly_white",
-        plot_bgcolor=_COLORS["bg"], paper_bgcolor="white",
-        margin=dict(l=160, r=15, t=50, b=40),
-        xaxis=dict(title="Mutual Information", gridcolor="rgba(0,0,0,0.04)"),
-        yaxis=dict(title=""),
-        height=max(300, len(edge_labels) * 26 + 100),
-    )
-    return fig
-
-
-def build_markov_blanket_fig(analyzer: BayesianAnalyzer, target_node: str) -> go.Figure:
-    """Subgraph showing only the Markov blanket of the target node."""
-    try:
-        mb = analyzer.compute_markov_blanket(target_node)
-    except Exception:
-        return go.Figure()
-
-    if not mb:
-        fig = go.Figure()
-        fig.update_layout(
-            title=dict(text=f"Markov Blanket of {target_node}: empty", font=dict(size=14)),
-            height=200,
-        )
-        return fig
-
-    mb_nodes = mb | {target_node}
-    sub_edges = [(u, v) for u, v in analyzer.edges if u in mb_nodes and v in mb_nodes]
-
-    g = nx.DiGraph()
-    g.add_nodes_from(sorted(mb_nodes))
-    g.add_edges_from(sub_edges)
-    pos = _compute_layout(g, analyzer.config)
-
-    fig = go.Figure()
-
-    # Edges
-    ex, ey = [], []
-    for u, v in g.edges():
-        x0, y0 = pos[u]
-        x1, y1 = pos[v]
-        ex += [x0, x1, None]
-        ey += [y0, y1, None]
-    fig.add_trace(go.Scatter(
-        x=ex, y=ey, mode="lines",
-        line=dict(width=1.5, color=_COLORS["edge"]),
-        hoverinfo="none", showlegend=False,
-    ))
-
-    # Arrows
-    annotations = []
-    for u, v in g.edges():
-        x0, y0 = pos[u]
-        x1, y1 = pos[v]
-        dx, dy = x1 - x0, y1 - y0
-        dist = math.hypot(dx, dy)
-        if dist > 0:
-            x1a = x1 - dx / dist * 0.08
-            y1a = y1 - dy / dist * 0.08
-        else:
-            x1a, y1a = x1, y1
-        annotations.append(dict(
-            ax=x0, ay=y0, x=x1a, y=y1a,
-            xref="x", yref="y", axref="x", ayref="y",
-            showarrow=True, arrowhead=3, arrowsize=1.3,
-            arrowwidth=1.5, arrowcolor=_COLORS["primary"], opacity=0.75,
-        ))
-
-    # Nodes
-    nodes = sorted(g.nodes())
-    nx_arr = [pos[n][0] for n in nodes]
-    ny_arr = [pos[n][1] for n in nodes]
-    colors = [_COLORS["danger"] if n == target_node else _COLORS["primary"] for n in nodes]
-    bw = [3.0 if n == target_node else 1.5 for n in nodes]
-
-    fig.add_trace(go.Scatter(
-        x=nx_arr, y=ny_arr, mode="markers+text",
-        text=nodes, textposition="top center",
-        textfont=dict(size=12, color=_COLORS["text"]),
-        hovertext=[f"<b>{n}</b>" + (" (TARGET)" if n == target_node else " (blanket)") for n in nodes],
-        hoverinfo="text",
-        marker=dict(size=40, color=colors, line=dict(width=bw, color="rgba(50,60,80,0.9)")),
-        showlegend=False,
-    ))
-
-    fig.update_layout(
-        annotations=annotations,
-        title=dict(text=f"Markov Blanket of {target_node} ({len(mb)} nodes)", font=dict(size=14)),
-        template="plotly_white",
-        plot_bgcolor=_COLORS["bg"], paper_bgcolor="white",
-        margin=dict(l=10, r=10, t=50, b=10),
-        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-        dragmode="pan", height=400,
-    )
-    return fig
-
-
-def _fig_to_div(fig: go.Figure) -> str:
-    """Convert Plotly figure to embeddable HTML div."""
-    return fig.to_html(
-        include_plotlyjs=False, full_html=False,
-        config={"scrollZoom": True, "displayModeBar": True,
-                "modeBarButtonsToRemove": ["lasso2d", "select2d"]},
-    )
 
 
 # ---------------------------------------------------------------------------
 # Inference helpers
 # ---------------------------------------------------------------------------
 
-def run_inference(analyzer: BayesianAnalyzer, evidence: Dict[str, str]) -> Dict[str, Dict[str, float]]:
+def _run_inference(
+    analyzer: BayesianAnalyzer,
+    evidence: Dict[str, str],
+) -> Dict[str, Dict[str, float]]:
     """Run inference for all non-evidence variables."""
     posteriors: Dict[str, Dict[str, float]] = {}
     try:
@@ -580,6 +123,35 @@ def run_inference(analyzer: BayesianAnalyzer, evidence: Dict[str, str]) -> Dict[
     except Exception as exc:
         logger.warning("Inference failed: %s", exc)
     return posteriors
+
+
+def _compute_edge_mi(analyzer: BayesianAnalyzer) -> Tuple[List[str], List[float]]:
+    """Compute MI for each learned edge."""
+    edges = analyzer.edges
+    if not edges:
+        return [], []
+    data = analyzer.data
+    edge_labels: List[str] = []
+    mi_vals: List[float] = []
+    for u, v in edges:
+        xu = data[u].astype(str).to_numpy()
+        xv = data[v].astype(str).to_numpy()
+        mi = float(mutual_info_score(xu, xv))
+        edge_labels.append(f"{u} -> {v}")
+        mi_vals.append(mi)
+    return edge_labels, mi_vals
+
+
+def _mi_func_for(analyzer: BayesianAnalyzer):
+    """Return a closure for pairwise MI computation (cached per call)."""
+    data = analyzer.data
+
+    def _mi(col_i: str, col_j: str) -> float:
+        xi = data[col_i].astype(str).to_numpy()
+        xj = data[col_j].astype(str).to_numpy()
+        return float(mutual_info_score(xi, xj))
+
+    return _mi
 
 
 # ---------------------------------------------------------------------------
@@ -620,7 +192,6 @@ def create_app(secret_key: Optional[str] = None) -> Flask:
                 flash("Please upload a CSV file or paste CSV data.", "warning")
                 return redirect(url_for("index"))
             try:
-                # Auto-detect delimiter
                 sniffer = csv.Sniffer()
                 try:
                     dialect = sniffer.sniff(text[:4096])
@@ -668,11 +239,9 @@ def create_app(secret_key: Optional[str] = None) -> Flask:
             flash(f"Training error: {exc}", "danger")
             return redirect(url_for("index"))
 
-        # Default target
         if not target_node or target_node not in analyzer.columns:
             target_node = analyzer.columns[0]
 
-        # Store session
         sid = uuid.uuid4().hex[:12]
         _put_session(sid, _Session(
             analyzer=analyzer,
@@ -682,8 +251,10 @@ def create_app(secret_key: Optional[str] = None) -> Flask:
             evidence={},
         ))
 
-        logger.info("Session %s created: %s (%d x %d), target=%s",
-                     sid, source, df.shape[0], df.shape[1], target_node)
+        logger.info(
+            "Session %s created: %s (%d x %d), target=%s",
+            sid, source, df.shape[0], df.shape[1], target_node,
+        )
 
         return redirect(url_for("dashboard", sid=sid))
 
@@ -696,13 +267,14 @@ def create_app(secret_key: Optional[str] = None) -> Flask:
 
         analyzer = sess.analyzer
         evidence = dict(sess.evidence)
+        cfg = analyzer.config
 
         # Handle POST (evidence update)
         if request.method == "POST":
             action = request.form.get("action", "")
 
             if action == "update_evidence":
-                new_evidence = {}
+                new_evidence: Dict[str, str] = {}
                 for col in analyzer.columns:
                     val = request.form.get(f"ev_{col}", "")
                     if val:
@@ -721,20 +293,57 @@ def create_app(secret_key: Optional[str] = None) -> Flask:
 
         target_node = sess.target_node
 
-        # --- Compute all charts ---
-        posteriors = run_inference(analyzer, evidence)
+        # --- Compute all charts (using shared charts module) ---
+        posteriors = _run_inference(analyzer, evidence)
 
-        # Build figures
-        net_fig = build_network_fig(analyzer, target_node, evidence, posteriors)
-        sens_fig = build_sensitivity_fig(analyzer, target_node)
-        post_fig = build_posterior_fig(posteriors, target_node)
-        dist_fig = build_data_distribution_fig(sess.df_raw)
-        mi_matrix_fig = build_mi_matrix_fig(analyzer)
-        edge_fig = build_edge_strength_fig(analyzer)
-        mb_fig = build_markov_blanket_fig(analyzer, target_node)
+        net_fig = build_network_figure(
+            columns=analyzer.columns,
+            edges=analyzer.edges,
+            layout_k=cfg.layout_k,
+            layout_seed=cfg.layout_seed,
+            target_node=target_node,
+            evidence=evidence,
+            posteriors=posteriors,
+            show_title=False,
+            width=0,
+            height=500,
+        )
+
+        try:
+            mi_scores = analyzer.compute_sensitivity(target_node)
+        except KeyError:
+            mi_scores = {}
+        sens_fig = build_sensitivity_figure(
+            mi_scores=mi_scores,
+            target_node=target_node,
+            show_title=False,
+        )
+
+        post_fig = build_posterior_figure(posteriors, target_node)
+        dist_fig = build_data_distribution_figure(sess.df_raw)
+
+        mi_matrix_fig = build_mi_matrix_figure(
+            columns=analyzer.columns,
+            mi_func=_mi_func_for(analyzer),
+        )
+
+        edge_labels, edge_mi_vals = _compute_edge_mi(analyzer)
+        edge_fig = build_edge_strength_figure(edge_labels, edge_mi_vals)
+
+        try:
+            mb = analyzer.compute_markov_blanket(target_node)
+        except Exception:
+            mb = set()
+        mb_fig = build_markov_blanket_figure(
+            target_node=target_node,
+            mb_nodes=mb,
+            edges=analyzer.edges,
+            layout_k=cfg.layout_k,
+            layout_seed=cfg.layout_seed,
+        )
 
         # CPD heatmaps for nodes with parents
-        cpd_divs = []
+        cpd_divs: List[Tuple[str, str]] = []
         model_nodes = set(analyzer.model.nodes()) if analyzer.model else set()
         for node in analyzer.columns:
             if node not in model_nodes:
@@ -742,26 +351,27 @@ def create_app(secret_key: Optional[str] = None) -> Flask:
             cpd = analyzer.model.get_cpds(node)
             if cpd is not None and len(cpd.variables) > 1:
                 try:
-                    cpd_fig = build_cpd_fig(analyzer, node)
-                    cpd_divs.append((node, _fig_to_div(cpd_fig)))
+                    cpd_fig = build_cpd_heatmap_figure(cpd=cpd, node=node)
+                    cpd_divs.append((node, fig_to_div(cpd_fig)))
                 except Exception:
                     pass
 
         # Convert figures to divs
-        net_div = _fig_to_div(net_fig)
-        sens_div = _fig_to_div(sens_fig)
-        post_div = _fig_to_div(post_fig)
-        dist_div = _fig_to_div(dist_fig)
-        mi_div = _fig_to_div(mi_matrix_fig)
-        edge_div = _fig_to_div(edge_fig)
-        mb_div = _fig_to_div(mb_fig)
+        net_div = fig_to_div(net_fig)
+        sens_div = fig_to_div(sens_fig)
+        post_div = fig_to_div(post_fig)
+        dist_div = fig_to_div(dist_fig)
+        mi_div = fig_to_div(mi_matrix_fig)
+        edge_div = fig_to_div(edge_fig)
+        mb_div = fig_to_div(mb_fig)
 
         # State values per column (for evidence dropdowns)
         col_states: Dict[str, List[str]] = {}
         for col in analyzer.columns:
-            col_states[col] = sorted(analyzer.data[col].astype(str).unique().tolist())
+            col_states[col] = sorted(
+                analyzer.data[col].astype(str).unique().tolist()
+            )
 
-        # Summary
         summary = analyzer.summary()
 
         return render_template_string(
@@ -1186,6 +796,7 @@ def main(host: str = "127.0.0.1", port: int = 5000, debug: bool = False) -> None
 
 if __name__ == "__main__":
     import argparse
+
     from bayesian_network.logging_config import setup_logging
     setup_logging(level=logging.INFO)
 
