@@ -44,6 +44,66 @@ class TestIndexPage:
         assert b"<form" in resp.data
         assert b"csvfile" in resp.data
 
+    def test_index_has_demo_button(self, client) -> None:
+        resp = client.get("/")
+        assert b"demo" in resp.data.lower()
+        assert b"Demo Data" in resp.data
+
+    def test_index_has_japanese_text(self, client) -> None:
+        resp = client.get("/")
+        html = resp.data.decode("utf-8")
+        assert "データ入力" in html
+        assert "分析開始" in html
+
+    def test_index_has_getting_started_guide(self, client) -> None:
+        resp = client.get("/")
+        html = resp.data.decode("utf-8")
+        assert "Getting Started" in html or "はじめて" in html
+
+
+class TestDemoEndpoint:
+    def test_demo_creates_session(self, client) -> None:
+        resp = client.post("/demo")
+        assert resp.status_code == 302
+        assert "/dashboard/" in resp.headers["Location"]
+
+    def test_demo_dashboard_loads(self, client) -> None:
+        resp = client.post("/demo", follow_redirects=True)
+        assert resp.status_code == 200
+        assert b"Dashboard" in resp.data or b"dashboard" in resp.data
+
+    def test_demo_shows_network(self, client) -> None:
+        resp = client.post("/demo", follow_redirects=True)
+        assert resp.status_code == 200
+        assert b"Network" in resp.data
+
+
+class TestDemoCsvApi:
+    def test_api_returns_json(self, client) -> None:
+        resp = client.get("/api/demo-csv")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert "csv" in data
+        assert "columns" in data
+        assert "target_node" in data
+
+    def test_api_csv_has_headers(self, client) -> None:
+        resp = client.get("/api/demo-csv")
+        data = resp.get_json()
+        assert "Weather" in data["csv"]
+        assert "Commute" in data["csv"]
+
+    def test_api_columns_list(self, client) -> None:
+        resp = client.get("/api/demo-csv")
+        data = resp.get_json()
+        assert isinstance(data["columns"], list)
+        assert len(data["columns"]) >= 2
+
+    def test_api_target_node(self, client) -> None:
+        resp = client.get("/api/demo-csv")
+        data = resp.get_json()
+        assert data["target_node"] == "Commute"
+
 
 class TestAnalyzeEndpoint:
     def test_no_data_redirects(self, client) -> None:
@@ -120,6 +180,37 @@ class TestDashboardEndpoint:
         resp2 = client.get(dashboard_url)
         assert resp2.status_code == 200
         assert b"Network" in resp2.data
+
+    def test_dashboard_has_help_panel(self, client, _sample_csv: str) -> None:
+        resp = client.post("/analyze", data={
+            "csvtext": _sample_csv,
+            "scoring_method": "bic-d",
+            "max_indegree": "3",
+            "prior_type": "BDeu",
+            "equivalent_sample_size": "5.0",
+            "discretize_bins": "5",
+            "target_node": "Commute",
+        })
+        dashboard_url = resp.headers["Location"]
+        resp2 = client.get(dashboard_url)
+        html = resp2.data.decode("utf-8")
+        assert "操作ガイド" in html or "Quick Guide" in html
+
+    def test_dashboard_has_japanese_tab_labels(self, client, _sample_csv: str) -> None:
+        resp = client.post("/analyze", data={
+            "csvtext": _sample_csv,
+            "scoring_method": "bic-d",
+            "max_indegree": "3",
+            "prior_type": "BDeu",
+            "equivalent_sample_size": "5.0",
+            "discretize_bins": "5",
+            "target_node": "Commute",
+        })
+        dashboard_url = resp.headers["Location"]
+        resp2 = client.get(dashboard_url)
+        html = resp2.data.decode("utf-8")
+        assert "ネットワーク" in html
+        assert "感度" in html
 
     def test_evidence_update(self, client, _sample_csv: str) -> None:
         # Create session
