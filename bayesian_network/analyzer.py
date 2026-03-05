@@ -15,6 +15,7 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 from pgmpy.estimators import BayesianEstimator, HillClimbSearch
+from pgmpy.factors.discrete import TabularCPD
 from pgmpy.inference import VariableElimination
 from sklearn.metrics import mutual_info_score
 
@@ -151,15 +152,16 @@ class BayesianAnalyzer:
         if self._config.discretize_numeric:
             out = self._discretize_numerics(out)
 
-        # 3. Ensure all columns are discrete-friendly
+        # 3. Ensure all columns are discrete-friendly (always string-typed)
         for col in out.columns:
+            # Cast to str first to avoid mixed-type categories (e.g. float + sentinel string)
+            out[col] = out[col].astype(str)
             nunique = out[col].nunique(dropna=False)
             if nunique > self._config.max_states_per_col:
                 logger.warning(
-                    "Column '%s' has %d unique values (> %d); casting to str",
+                    "Column '%s' has %d unique values (> %d); keeping as str",
                     col, nunique, self._config.max_states_per_col,
                 )
-                out[col] = out[col].astype(str)
             else:
                 out[col] = out[col].astype("category")
 
@@ -234,12 +236,32 @@ class BayesianAnalyzer:
         logger.info("Learned %d edges", len(self._edges))
 
         self._model = _BNModel(self._edges)
+        # Ensure all data columns are nodes even if they have no edges
+        for col in self._data.columns:
+            if col not in self._model.nodes():
+                self._model.add_node(col)
         self._model.fit(
             self._data,
             estimator=BayesianEstimator,
             prior_type=self._config.prior_type,
             equivalent_sample_size=self._config.equivalent_sample_size,
         )
+        # Add marginal CPDs for isolated nodes (pgmpy's fit skips them)
+        fitted_vars = {cpd.variable for cpd in self._model.get_cpds()}
+        for col in self._data.columns:
+            if col not in fitted_vars and col in self._model.nodes():
+                states = sorted(self._data[col].astype(str).unique().tolist())
+                counts = self._data[col].astype(str).value_counts()
+                ess = self._config.equivalent_sample_size
+                total = len(self._data) + ess
+                probs = [(counts.get(s, 0) + ess / len(states)) / total for s in states]
+                cpd = TabularCPD(
+                    variable=col,
+                    variable_card=len(states),
+                    values=[[p] for p in probs],
+                    state_names={col: states},
+                )
+                self._model.add_cpds(cpd)
         self._inference = VariableElimination(self._model)
 
         self._training_time = time.perf_counter() - t0

@@ -114,7 +114,7 @@ class TestInference:
         assert abs(result.values.sum() - 1.0) < 1e-6
 
     def test_query_with_evidence(self, trained_analyzer: BayesianAnalyzer) -> None:
-        result = trained_analyzer.query("C", {"A": 0})
+        result = trained_analyzer.query("C", {"A": "0"})
         assert abs(result.values.sum() - 1.0) < 1e-6
 
 
